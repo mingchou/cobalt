@@ -54,7 +54,8 @@ class AudioRendererPassthrough
 
   AudioRendererPassthrough(const AudioStreamInfo& audio_stream_info,
                            SbDrmSystem drm_system,
-                           bool enable_flush_during_seek);
+                           bool enable_flush_during_seek,
+                           bool use_mediacodec_callback_thread);
   ~AudioRendererPassthrough() override;
 
   bool is_valid() const { return decoder_ != nullptr; }

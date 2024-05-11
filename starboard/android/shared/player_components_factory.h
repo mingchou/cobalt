@@ -80,6 +80,11 @@ constexpr bool kForceFlushDecoderDuringReset = false;
 // during Reset(). This should be enabled with kForceFlushDecoderDuringReset.
 constexpr bool kForceResetAudioDecoder = false;
 
+// Use a new created handler thread to handle mediacodec callbacks. This
+// prevents the mediacodec callbacks are blocked by activity lifecycle
+// callbacks.
+constexpr bool kUseHandlerThread = false;
+
 // This class allows us to force int16 sample type when tunnel mode is enabled.
 class AudioRendererSinkAndroid : public ::starboard::shared::starboard::player::
                                      filter::AudioRendererSinkImpl {
@@ -217,10 +222,12 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
                                                          error_message);
     }
 
+    bool audio_use_mediacodec_callback_thread = true;
     if (!creation_parameters.audio_mime().empty()) {
       MimeType audio_mime_type(creation_parameters.audio_mime());
       if (!audio_mime_type.is_valid() ||
-          !audio_mime_type.ValidateBoolParameter("audiopassthrough")) {
+          !audio_mime_type.ValidateBoolParameter("audiopassthrough") ||
+          !audio_mime_type.ValidateBoolParameter("mediacodeccallbackthread")) {
         return scoped_ptr<PlayerComponents>();
       }
 
@@ -229,6 +236,8 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
                         "false. Passthrough is disabled.";
         return scoped_ptr<PlayerComponents>();
       }
+      audio_use_mediacodec_callback_thread = audio_mime_type.GetParamBoolValue(
+          "mediacodeccallbackthread", kUseHandlerThread);
     }
 
     bool enable_flush_during_seek = false;
@@ -253,7 +262,8 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
     scoped_ptr<AudioRendererPassthrough> audio_renderer;
     audio_renderer.reset(new AudioRendererPassthrough(
         creation_parameters.audio_stream_info(),
-        creation_parameters.drm_system(), enable_flush_during_seek));
+        creation_parameters.drm_system(), enable_flush_during_seek,
+        audio_use_mediacodec_callback_thread));
     if (!audio_renderer->is_valid()) {
       return scoped_ptr<PlayerComponents>();
     }
@@ -271,10 +281,22 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
       constexpr int kTunnelModeAudioSessionId = -1;
       constexpr bool kForceSecurePipelineUnderTunnelMode = false;
 
-      scoped_ptr<VideoDecoder> video_decoder =
-          CreateVideoDecoder(creation_parameters, kTunnelModeAudioSessionId,
-                             kForceSecurePipelineUnderTunnelMode,
-                             max_video_input_size, error_message);
+      bool video_use_mediacodec_callback_thread = true;
+      if (!creation_parameters.video_mime().empty()) {
+        MimeType video_mime_type(creation_parameters.video_mime());
+        if (!video_mime_type.is_valid() ||
+            !video_mime_type.ValidateBoolParameter(
+                "mediacodeccallbackthread")) {
+          return scoped_ptr<PlayerComponents>();
+        }
+        video_use_mediacodec_callback_thread =
+            video_mime_type.GetParamBoolValue("mediacodeccallbackthread",
+                                              kUseHandlerThread);
+      }
+      scoped_ptr<VideoDecoder> video_decoder = CreateVideoDecoder(
+          creation_parameters, kTunnelModeAudioSessionId,
+          kForceSecurePipelineUnderTunnelMode, max_video_input_size,
+          video_use_mediacodec_callback_thread, error_message);
       if (video_decoder) {
         using starboard::shared::starboard::player::filter::VideoRendererImpl;
 
@@ -310,7 +332,8 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
             : "";
     MimeType audio_mime_type(audio_mime);
     if (!audio_mime.empty()) {
-      if (!audio_mime_type.is_valid()) {
+      if (!audio_mime_type.is_valid() ||
+          !audio_mime_type.ValidateBoolParameter("mediacodeccallbackthread")) {
         *error_message =
             "Invalid audio MIME: '" + std::string(audio_mime) + "'";
         return false;
@@ -325,7 +348,8 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
     if (!video_mime.empty()) {
       if (!video_mime_type.is_valid() ||
           !video_mime_type.ValidateBoolParameter("tunnelmode") ||
-          !video_mime_type.ValidateBoolParameter("enableflushduringseek")) {
+          !video_mime_type.ValidateBoolParameter("enableflushduringseek") ||
+          !video_mime_type.ValidateBoolParameter("mediacodeccallbackthread")) {
         *error_message =
             "Invalid video MIME: '" + std::string(video_mime) + "'";
         return false;
@@ -423,7 +447,11 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
       SB_DCHECK(audio_renderer_sink);
 
       using starboard::shared::starboard::media::AudioStreamInfo;
-      auto decoder_creator = [enable_flush_during_seek](
+      bool audio_use_mediacodec_callback_thread =
+          audio_mime_type.GetParamBoolValue("mediacodeccallbackthread",
+                                            kUseHandlerThread);
+      auto decoder_creator = [enable_flush_during_seek,
+                              audio_use_mediacodec_callback_thread](
                                  const AudioStreamInfo& audio_stream_info,
                                  SbDrmSystem drm_system) {
         bool use_libopus_decoder =
@@ -438,7 +466,8 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
         } else if (audio_stream_info.codec == kSbMediaAudioCodecAac ||
                    audio_stream_info.codec == kSbMediaAudioCodecOpus) {
           scoped_ptr<AudioDecoder> audio_decoder_impl(new AudioDecoder(
-              audio_stream_info, drm_system, enable_flush_during_seek));
+              audio_stream_info, drm_system, enable_flush_during_seek,
+              audio_use_mediacodec_callback_thread));
           if (audio_decoder_impl->is_valid()) {
             return audio_decoder_impl.PassAs<AudioDecoderBase>();
           }
@@ -482,10 +511,13 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
         force_secure_pipeline_under_tunnel_mode = false;
       }
 
-      scoped_ptr<VideoDecoder> video_decoder_impl =
-          CreateVideoDecoder(creation_parameters, tunnel_mode_audio_session_id,
-                             force_secure_pipeline_under_tunnel_mode,
-                             max_video_input_size, error_message);
+      bool video_use_mediacodec_callback_thread =
+          video_mime_type.GetParamBoolValue("mediacodeccallbackthread",
+                                            kUseHandlerThread);
+      scoped_ptr<VideoDecoder> video_decoder_impl = CreateVideoDecoder(
+          creation_parameters, tunnel_mode_audio_session_id,
+          force_secure_pipeline_under_tunnel_mode, max_video_input_size,
+          video_use_mediacodec_callback_thread, error_message);
       if (video_decoder_impl) {
         *video_render_algorithm = video_decoder_impl->GetRenderAlgorithm();
         *video_renderer_sink = video_decoder_impl->GetSink();
@@ -530,6 +562,7 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
       int tunnel_mode_audio_session_id,
       bool force_secure_pipeline_under_tunnel_mode,
       int max_video_input_size,
+      bool use_mediacodec_callback_thread,
       std::string* error_message) {
     bool force_big_endian_hdr_metadata = false;
     bool enable_flush_during_seek = false;
@@ -563,7 +596,8 @@ class PlayerComponentsFactory : public starboard::shared::starboard::player::
         creation_parameters.max_video_capabilities(),
         tunnel_mode_audio_session_id, force_secure_pipeline_under_tunnel_mode,
         kForceResetSurfaceUnderTunnelMode, force_big_endian_hdr_metadata,
-        max_video_input_size, enable_flush_during_seek, error_message));
+        max_video_input_size, enable_flush_during_seek,
+        use_mediacodec_callback_thread, error_message));
     if (creation_parameters.video_codec() == kSbMediaVideoCodecAv1 ||
         video_decoder->is_decoder_created()) {
       return video_decoder.Pass();
